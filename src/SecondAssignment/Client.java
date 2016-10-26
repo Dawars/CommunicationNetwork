@@ -2,6 +2,7 @@ package SecondAssignment;
 
 import java.io.*;
 import java.net.*;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -20,13 +21,86 @@ public class Client {
     private String sender = "CTE1MR"; // Should be NEPTUN code of the author
     private byte[] outBuf = null; // A byte buffer to store the outgoing objects.
     private byte[] inBuf = null; // A byte buffer to store the incoming objects.
-    private String recivedData = null; // A string to store the recived data (not neccessery to use).
+    private String receivedData = null; // A string to store the received data (not necessary to use).
+
+    private int SEQ = 0;
+    private int ACK = 0;
+
+    /**
+     * Reads a TCPSegment from socket
+     * @return TCPSegment or null, if there was an error
+     */
+    private TCPSegment receiveSegment() throws SocketTimeoutException {
+        TCPSegment segment = null;
+        try {
+            DatagramPacket packet = new DatagramPacket(inBuf, inBuf.length);
+            socket.receive(packet);
+
+            segment = deserializeSegment(packet.getData());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        System.out.println(segment);
+        return segment;
+    }
+
+    private TCPSegment receiveCorrectSegment() throws SocketTimeoutException {
+        int receivedSeq = -1;
+        TCPSegment received = null;
+        while (receivedSeq != ACK) {
+            received = receiveSegment();
+            receivedSeq = received.getSequenceNumber();
+            if (receivedSeq != ACK) {
+                System.out.println("Invalid segment received!");
+                System.out.println(ACK);
+                System.out.println(receivedSeq);
+                TCPSegment emptySegment = new TCPSegment(sender, String.valueOf(destinationPort), SEQ, ACK, true, false, false, false, "");
+                sendSegment(emptySegment);
+            }
+        }
+        ACK = received.getSequenceNumber() + 1;
+        return received;
+    }
+
+    /**
+     * Serialize TCPSegment and send it through socket
+     */
+    private void sendSegment(TCPSegment segment) {
+        System.out.println(segment);
+        outBuf = serializeSegment(segment);
+        dp.setData(outBuf);
+
+        try {
+            socket.send(dp);
+            SEQ++;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
+    private TCPSegment receiveSegmentAndSendAck() throws SocketTimeoutException {
+        TCPSegment received = receiveCorrectSegment();
+        System.out.println(SEQ);
+        System.out.println(ACK);
+        TCPSegment ackSegment = new TCPSegment(sender, String.valueOf(destinationPort), SEQ, ACK,
+                false, true, false, false, "");
+        sendSegment(ackSegment);
+
+        return received;
+    }
+
+    private TCPSegment sendSegmentAndWaitForAck(TCPSegment segment) throws SocketTimeoutException {
+        sendSegment(segment);
+        int receivedAck = -1;
+        return receiveCorrectSegment();
+    }
 
     /**
      * Initializes the SecondAssignment.Client object.
      */
     public void initialise() {
-        recivedData = "";
+        receivedData = "";
         try {
             destinationAddress = InetAddress.getByName("152.66.249.135");
             socket = new DatagramSocket();
@@ -36,9 +110,6 @@ public class Client {
             dp.setPort(destinationPort);
 
             inBuf = new byte[1024];
-
-        } catch (SocketException e) {
-            e.printStackTrace();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -78,7 +149,7 @@ public class Client {
         try {
             ois = new ObjectInputStream(bais);
         } catch (IOException e) {
-            LOGGER.log(Level.WARNING, "ObjectInputStreem error: {0}", e.getLocalizedMessage());
+            LOGGER.log(Level.WARNING, "ObjectInputStream error: {0}", e.getLocalizedMessage());
         }
 
         TCPSegment recivedPacket = null;
@@ -96,159 +167,61 @@ public class Client {
     /**
      * Performs 3-Way Handshake with the server to establish a virtual TCP connection.
      */
-    private void performHandShake() {
-
+    private void performHandShake() throws SocketTimeoutException {
         TCPSegment synPacked = new TCPSegment(sender, String.valueOf(destinationPort), SEQ, ACK, true, false, false, false, "");
-
-        outBuf = serializeSegment(synPacked);
-        dp.setData(outBuf);
-
-        try {
-            socket.send(dp);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        // SYNACK
         TCPSegment synack = null;
-        try {
-            DatagramPacket packet = new DatagramPacket(inBuf, inBuf.length);
-            socket.receive(packet);
-
-            synack = deserializeSegment(packet.getData());
-            ACK = synack.getSequenceNumber(); //updating ack
-
-            System.out.println("synack");
-            System.out.println(synack);
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-
-        // ACK
-        TCPSegment ackPacked = new TCPSegment(sender, String.valueOf(destinationPort), ++SEQ, ++ACK,
-                false, true, false, false, "");
-
-        outBuf = serializeSegment(ackPacked);
-        dp.setData(outBuf);
-
-        try {
-            socket.send(dp);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        System.out.println("ack");
-
-
+        do {
+            // ACK
+            sendSegment(synPacked);
+            // SYNACK - ACK
+            synack = receiveSegment();
+            System.out.println(synack.isACKflag());
+            System.out.println(synack.isSYNflag());
+        } while (!synack.isSYNflag() || !synack.isACKflag());
+        ACK = synack.getSequenceNumber() + 1;
+        TCPSegment ackPacked = new TCPSegment(sender, String.valueOf(destinationPort), SEQ, ACK, false, true, false, false, "");
+        sendSegment(ackPacked);
     }
 
     @Override
     protected void finalize() throws Throwable {
+        super.finalize();
         socket.close();
     }
 
-    int SEQ = 0;
-    int ACK = 0;
-
     /**
-     * Recives data from the server. (20 times 10 characters.)
+     * Receives data from the server. (20 times 10 characters.)
      */
-    public void reciveData() {
-        while (recivedData.length() < 200) {
-            TCPSegment tcpSegment = null;
-            try {
-                // receive
-                DatagramPacket packet = new DatagramPacket(inBuf, inBuf.length);
-                socket.receive(packet);
-
-                tcpSegment = deserializeSegment(packet.getData());
-                int seq = tcpSegment.getSequenceNumber();
-                if (seq == ACK) {
-                    ACK++;
-                    recivedData += tcpSegment.getData();
-                }
-                //send ack
-
-                TCPSegment ackPacked = new TCPSegment(sender, String.valueOf(destinationPort), ++SEQ, ACK,
-                        false, true, false, false, "");
-
-                outBuf = serializeSegment(ackPacked);
-                dp.setData(outBuf);
-
-                socket.send(dp);
-
-
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-
+    public void reciveData() throws SocketTimeoutException {
+        while (receivedData.length() < 200) {
+            TCPSegment received = receiveSegmentAndSendAck();
+            receivedData += received.getData();
         }
-        System.out.println(recivedData);
+
+        System.out.println(receivedData);
     }
 
     /**
      * Terminates the virtual TCP connection with the server.
      */
 
-    private void terminateConnection() {
+    private void terminateConnection() throws SocketTimeoutException {
+        TCPSegment finSegment = new TCPSegment(sender, String.valueOf(destinationPort), SEQ, ACK,
+                false, false, true, false, "");
+        TCPSegment received = null;
+        do {
+            sendSegment(finSegment);
+            received = receiveSegment();
+        } while (!received.isACKflag());
+        System.out.println("fin ack");
+        do {
+            received = receiveSegment();
+        } while (!received.isFINflag());
+        TCPSegment ackSegment = new TCPSegment(sender, String.valueOf(destinationPort), received.getAcknowledgeNumber(),
+                received.getSequenceNumber()+1,
+                false, true, false, false, "");
+        sendSegment(ackSegment);
 
-        TCPSegment tcpSegment = null;
-        try {
-
-            //send fin
-
-            TCPSegment ackPacked = new TCPSegment(sender, String.valueOf(destinationPort), ++SEQ, ACK,
-                    false, false, true, false, "");
-
-            outBuf = serializeSegment(ackPacked);
-            dp.setData(outBuf);
-
-            socket.send(dp);
-
-
-            // receive
-            DatagramPacket packet = new DatagramPacket(inBuf, inBuf.length);
-            socket.receive(packet);
-
-            tcpSegment = deserializeSegment(packet.getData());
-            System.out.println("(FIN)ACK");
-            System.out.println(tcpSegment);
-            int seq = tcpSegment.getSequenceNumber();
-            if (seq == ACK) {
-                ACK++;
-                recivedData += tcpSegment.getData();
-            }
-
-
-            // wait for server fin
-            packet = new DatagramPacket(inBuf, inBuf.length);
-            socket.receive(packet);
-
-            tcpSegment = deserializeSegment(packet.getData());
-            System.out.println("FIN received");
-            System.out.println(tcpSegment);
-            seq = tcpSegment.getSequenceNumber();
-            if (seq == ACK) {
-                ACK++;
-                recivedData += tcpSegment.getData();
-            }
-
-            // ACK send
-
-            ackPacked = new TCPSegment(sender, String.valueOf(destinationPort), ++SEQ, ACK,
-                    false, true, false, false, "");
-
-            outBuf = serializeSegment(ackPacked);
-            dp.setData(outBuf);
-
-            socket.send(dp);
-
-
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
     }
 
     /**
@@ -257,7 +230,7 @@ public class Client {
     private void sendDataBackWithTCP() {
         try {
             Socket socket = new Socket(destinationAddress, destinationPort);
-            new ObjectOutputStream(socket.getOutputStream()).writeObject(recivedData);
+            new ObjectOutputStream(socket.getOutputStream()).writeObject(receivedData);
 
             socket.close();
         } catch (IOException e) {
@@ -271,13 +244,16 @@ public class Client {
      * @param args
      */
     public static void main(String[] args) {
-
         Client client = new Client();
-        client.initialise();
-        client.performHandShake();//done
-        client.reciveData();
-        client.terminateConnection();
-        client.sendDataBackWithTCP();
+        try {
+            client.initialise();
+            client.performHandShake();
+            client.reciveData();
+            client.terminateConnection();
+            client.sendDataBackWithTCP();
+        } catch (SocketTimeoutException e) {
+            e.printStackTrace();
+        }
 
     }
 }
